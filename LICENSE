@@ -1,0 +1,13 @@
+The sensor-temp-humidity-sht40 crate is dually licensed under Apache License,
+Version 2.0 or the BSD 3-clause license (you can choose under which of the two
+licenses you use the code).
+
+If you want to contribute code to this project, you accept that any code you
+submit shall be dually licensed as above, with your copyright details added
+to the relevant source files.
+
+The text of the licenses can be consulted as follows:
+ * Apache License, Version 2.0 (the LICENSE-APACHE file in the repository or 
+   https://www.apache.org/licenses/LICENSE-2.0)
+ * 3-Clause BSD License (the LICENSE-BSD-3-CLAUSE file in the repository or
+   https://opensource.org/licenses/BSD-3-Clause)
