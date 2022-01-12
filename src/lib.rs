@@ -13,9 +13,8 @@
 ///
 /// By depending on embedded-hal, this driver is platform-agnostic and can be 
 /// used with any platform for which an implementation of the embedded-hal
-/// traits exists. Please note that this branch tracks the unstable development
-/// version of embedded-hal-1.0.0
-///
+/// traits exists. 
+/// 
 /// The full details about the SHT40 sensor can be read in its datasheet:
 /// https://www.sensirion.com/fileadmin/user_upload/customers/sensirion/Dokumente/2_Humidity_Sensors/Datasheets/Sensirion_Humidity_Sensors_SHT4x_Datasheet.pdf
 ///
@@ -28,7 +27,7 @@
 /// driver; For example, assuming you have connected a SH40 sensor to a linux
 /// machine and it is detected as an i2c device:
 ///
-/// ```ignore
+/// ```no_run
 /// use linux_embedded_hal as hal;
 ///
 /// use hal::{I2cdev, Delay};
@@ -50,8 +49,8 @@
 
 use embedded_hal as hal;
 
-use hal::delay::blocking::DelayUs;
-use hal::i2c::blocking::{Read, Write, WriteRead};
+use hal::blocking::delay::DelayMs;
+use hal::blocking::i2c::{Read, Write, WriteRead};
 
 use sensirion_i2c::{crc8, i2c};
 
@@ -158,8 +157,8 @@ pub enum TempUnit {
 /// SHT40Driver is the main structure with which a user of this driver
 /// interracts. It is generic over two parameters implementing embedded_hal 
 /// traits for the specific platform you're using: I2c which must implement 
-/// embedded_hal::i2c::blocking::{Read, Write, WriteRead} and Delay which must
-/// implement embedded_hal::delay::blocking::DelayUS.
+/// embedded_hal::blocking::i2c::{Read, Write, WriteRead} and Delay which must
+/// implement embedded_hal::blocking::delay::DelayMs.
 /// 
 /// Those implementations are needed for issuing I2C write commands to the 
 /// sensor, waiting until the sensor has performed the actual measurement and
@@ -308,7 +307,7 @@ impl Command {
 impl<I2C, D, E> SHT40Driver<I2C, D>
 where
     I2C: Read<Error = E> + Write<Error = E> + WriteRead<Error = E>,
-    D: DelayUs
+    D: DelayMs<u16>
 {
     /// Initialize a new instance of the driver. Any synchronization required
     /// for dealing with multiple instances needs to be managed externally to
@@ -377,11 +376,9 @@ where
     fn i2c_command_and_response(&mut self, cmd: Command, rx_bytes: Option<&mut [u8]>)
         -> Result<(), Error<E>>{
         let dev_cmd = cmd.as_device_command();
-        i2c::write_command_u8(&mut self.i2c, self.address, dev_cmd.cmd_code)
+        self.i2c.write(self.address, &dev_cmd.cmd_code.to_be_bytes())
             .map_err(|err| { Error::I2c(err) })?;
-        if let Err(_) = self.delay.delay_ms(dev_cmd.max_duration_ms as u32) {
-            return Err(Error::<E>::DelayError)
-        }
+        self.delay.delay_ms(dev_cmd.max_duration_ms);
         if let Some(rx_bytes) = rx_bytes {
             i2c::read_words_with_crc(&mut self.i2c, self.address, rx_bytes)?;
         };
@@ -544,7 +541,7 @@ where
     pub fn soft_reset_device(&mut self) -> Result<(), Error<E>> {
         let cmd = Command::SoftReset;
         let dev_cmd = cmd.as_device_command();
-        i2c::write_command_u8(&mut self.i2c, self.address, dev_cmd.cmd_code)
+        self.i2c.write(self.address, &dev_cmd.cmd_code.to_be_bytes())
             .map_err(|err| { Error::I2c(err) })?;
         Ok(())
     }

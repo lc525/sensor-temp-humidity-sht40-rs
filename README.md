@@ -7,11 +7,8 @@ driver for the Sensirion SHT40 temperature and relative-humidity sensor.
 
 ### Software 
 
-The driver is developed against the unstable 1.0.0 version of
-embedded-hal (currently supporting embedded-hal-1.0.0-alpha.6). As such, it
-should also be considered unstable. 
-
-A release is planned for the older, stable version of embedded-hal.
+The driver is developed against the stable 0.2.6 version of
+embedded-hal. Please use the main branch for hal-1.0.0 support
 
 ### Hardware Features
 
