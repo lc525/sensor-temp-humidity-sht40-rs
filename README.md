@@ -11,7 +11,8 @@ The driver is developed against the unstable 1.0.0 version of
 embedded-hal (currently supporting embedded-hal-1.0.0-alpha.6). As such, it
 should also be considered unstable. 
 
-A release is planned for the older, stable version of embedded-hal.
+For a driver version supporting the older, stable version of embedded-hal
+(0.2.6) please checkout the deps/hal-0.2.6 branch.
 
 ### Hardware Features
 
