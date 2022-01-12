@@ -15,9 +15,8 @@ A release is planned for the older, stable version of embedded-hal.
 
 ### Hardware Features
 
-- At the moment, the driver does not support activating the SHT40 built-in heater.
-However, the support for those commands exists and should require minimal
-changes (patches welcome!). 
+- At the moment, the driver is feature-complete, supporting all the commands
+that can be sent to the sensor.
 - The driver should work with other sensors from the SHT4x family (like SHT41 or
 SHT45) but this has not been tested.
 
@@ -26,6 +25,8 @@ SHT45) but this has not been tested.
 The crate is dually licensed under Apache License, Version 2.0 or the 
 BSD 3-clause license (you can choose under which of the two licenses you use 
 the code).
+
+## Contributions
 
 If you want to contribute code to this project, you accept that any code you
 submit shall be dually licensed as above, with your copyright details added

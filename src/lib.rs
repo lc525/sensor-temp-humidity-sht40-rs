@@ -12,9 +12,9 @@
 /// driver for the Sensirion SHT40 temperature and relative-humidity sensor.
 ///
 /// By depending on embedded-hal, this driver is platform-agnostic and can be 
-/// used with any physical device implementing the embedded-hal traits. Please
-/// note that this branch tracks the unstable development version of
-/// embedded-hal-1.0.0
+/// used with any platform for which an implementation of the embedded-hal
+/// traits exists. Please note that this branch tracks the unstable development
+/// version of embedded-hal-1.0.0
 ///
 /// The full details about the SHT40 sensor can be read in its datasheet:
 /// https://www.sensirion.com/fileadmin/user_upload/customers/sensirion/Dokumente/2_Humidity_Sensors/Datasheets/Sensirion_Humidity_Sensors_SHT4x_Datasheet.pdf
@@ -55,6 +55,7 @@ use hal::i2c::blocking::{Read, Write, WriteRead};
 
 use sensirion_i2c::{crc8, i2c};
 
+// I2C Commands supported by the SHT40 sensor
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy)]
 enum Command {
@@ -81,7 +82,7 @@ enum Command {
 /// standard deviation (3*sigma) of the resulting distribution. Average current
 /// consumption is given for continuous operation with one measurement per
 /// second.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Precision {
     /// Relative humididy meas. repeatability: 0.08 %RH
     /// Temperature meas. repeatability:       0.04 C
@@ -105,7 +106,7 @@ pub enum Precision {
     Low
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeaterPower {
     /// High is typically 200mW (for VDD=3.3V)
     High,
@@ -117,7 +118,7 @@ pub enum HeaterPower {
     Low,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeaterDuration {
     /// PulseLong is typically 1s (max 1.1s)
     PulseLong,
@@ -132,7 +133,7 @@ pub enum HeaterDuration {
 /// address 0x44 and SHT40-BD1B has address 0x45.
 #[allow(non_camel_case_types)]
 #[repr(u8)]
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum I2CAddr {
     /// use SHT4x_A for all products with I2C address 0x44, product numbers
     /// SHT4x-Axxx
@@ -143,12 +144,50 @@ pub enum I2CAddr {
     SHT4x_B = 0x45,
 }
 
+/// Measurement unit for Temperature. 
+///
+/// The raw integer measurements from the sensor can be converted directly into
+/// either unit, and this avoids users needing to do a subsequent floating-point
+/// unit transformation which might reduce accuracy.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum TempUnit {
     Farrenheit,
     Celsius,
 }
 
+/// SHT40Driver is the main structure with which a user of this driver
+/// interracts. It is generic over two parameters implementing embedded_hal 
+/// traits for the specific platform you're using: I2c which must implement 
+/// embedded_hal::i2c::blocking::{Read, Write, WriteRead} and Delay which must
+/// implement embedded_hal::delay::blocking::DelayUS.
+/// 
+/// Those implementations are needed for issuing I2C write commands to the 
+/// sensor, waiting until the sensor has performed the actual measurement and
+/// then issuing I2C read commands to get the measured data.
+///
+/// In this interraction, the device running the driver acts as the I2C master.
+/// 
+/// The actual types used to parameterise SHT40Driver depend on the embedded_hal
+/// trait implementations. 
+///
+/// For example, for the esp32 platform there are two crates implementing 
+/// embedded_hal, a bare-metal one (no_std) [`esp-hal`](https://github.com/esp-rs/esp32-hal)
+/// and [`esp-idf-hal`](https://github.com/esp-rs/esp-idf-hal/tree/embedded-hal-1-compat)
+/// which requires std and is built on top of the vendor-provided esp-idf C framework.
+///
+/// Each of those may in the future offer multiple implementations of i2c 
+/// (bit-banged, using I2C hardware controllers on the main processor, using 
+/// I2C hardware controllers on the ultra-low-power processor, etc). You would
+/// need to instantiate the type best suited for your application and then
+/// pass it to this driver.
+///
+/// Likewise, the nRF family of devices is supported using types implemented in
+/// the [`nrf-hal`](https://github.com/nrf-rs/nrf-hal) crate.
+///
+/// Please consult the documentation of the embedded_hal implementation for 
+/// your platform and examples using I2C to see exactly which types to use 
+/// during SHT40Driver initialization.
+/// 
 #[derive(Debug)]
 pub struct SHT40Driver<I2c, Delay> {
     i2c: I2c,
@@ -187,22 +226,39 @@ struct DeviceCommand {
     max_duration_ms: u16,
 }
 
+/// A sensor measurement result
+///
+/// You obtain a measurement by calling get_temp_and_rh(...) or 
+/// set_heater_then_measure(...) on an instance of SHT40Driver.
+#[derive(Debug, Clone, Copy)]
 pub struct Measurement {
+    /// Measured temperature
     pub temp: f32,
+    /// Unit of temperature measurement (C or F)
     pub temp_unit: TempUnit,
+    /// Measured relative humidity (%)
     pub rel_hum_percent: f32,
+    /// The precision that was requested when performing the measurement.
+    /// For measurements obtained through set_heater_then_measure(...),
+    /// the sensor automatically performs a Precision::High measurement.
     pub precision: Precision,
 }
 
-struct RawMeasurement {
+/// The raw, integer measurement data from the sensor.
+/// In order to get actual temperature/humidity values this needs to be 
+/// transformed. Normally, the transformations are done using the equations
+/// (1), (2) and (3) from the sensor's datasheet. This is what the usual
+/// measurement API does, but accessing raw measurements is provided
+/// as a convenience if you want to do your own calibration.
+pub struct RawMeasurement {
     temp_ticks: u16,
     rel_hum_ticks: u16,
     precision: Precision,
 }
 
-#[derive(PartialEq, Eq, Clone, Copy)]
+/// Structure for storing the sensor serial number
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub struct SerialNumber(u16, u16);
-
 
 
 impl Command {
@@ -254,11 +310,29 @@ where
     I2C: Read<Error = E> + Write<Error = E> + WriteRead<Error = E>,
     D: DelayUs
 {
+    /// Initialize a new instance of the driver. Any synchronization required
+    /// for dealing with multiple instances needs to be managed externally to
+    /// the driver (for example, synchronizing access to the underlying i2c
+    /// hardware).
+    ///
+    /// # Arguments
+    ///
+    /// * `i2c` - the object instance implementing access to the I2C controller 
+    ///           hardware or emulating the protocol in software for your target
+    ///           platform
+    /// * `address` - the I2C address of the SHT40 sensor. SHT4x sensors are
+    ///               assigned fixed addresses in hardware, and two such
+    ///               addresses are available (0x44 and 0x45). Please refer to
+    ///               the I2CAddr documentation for details.
+    /// * `delay` - the object instance implementing blocking delays for your
+    ///             target platform. This is used to block while waiting for
+    ///             the sensor to respond to a measurement request or for the
+    ///             heater to be deactivated.
     pub fn new(i2c: I2C, address: I2CAddr, delay: D) -> Self {
         SHT40Driver { i2c, address: address as u8, delay }
     }
 
-    fn parse_sensor_raw_measurement(rx_bytes: [u8; 6], check_crc: bool, precision: Precision)
+    fn parse_sensor_raw_measurement(rx_bytes: [u8; 6], precision: Precision, check_crc: bool)
         -> Result<RawMeasurement, Error<E>> {
             let temp_ticks = ((rx_bytes[0] as u16) << 8)  + (rx_bytes[1] as u16);
             let rel_hum_ticks = ((rx_bytes[3] as u16) << 8) + (rx_bytes[4] as u16);
@@ -295,8 +369,8 @@ where
     fn parse_measurement(rx_bytes: [u8; 6], precision: Precision, temp_unit: TempUnit, check_crc: bool)
         -> Result<Measurement, Error<E>> {
             let raw = SHT40Driver::<I2C, D>::parse_sensor_raw_measurement(rx_bytes,
-                                                              check_crc,
-                                                              precision)?;
+                                                              precision,
+                                                              check_crc)?;
             Ok(SHT40Driver::<I2C, D>::convert_raw_to_units(raw, temp_unit))
     }
 
@@ -314,6 +388,46 @@ where
         Ok(())
     }
 
+    /// Get the results of a measurement in raw sensor format (ticks). Please
+    /// consult the sensor datasheet for transformations which can be applied
+    /// to this raw data to get temperature and humidity values.
+    ///
+    /// The driver blocks for the max time the measurement can take, depending
+    /// on the requested Precision, waiting for the measurement results.
+    ///
+    /// # Arguments
+    ///
+    /// * `precision` - The precision with which to execute the measurement. 
+    ///                 Higher precision measurements take more time and consume
+    ///                 more power. Consult the Precision struct documentation
+    ///                 for details.
+    ///
+    pub fn get_raw_temp_and_rh_ticks(&mut self, precision: Precision) 
+        -> Result<RawMeasurement, Error<E>> {
+        let mut rx_bytes = [0; 6];
+        let cmd = Command::MeasureTempAndHumidity(precision);
+        self.i2c_command_and_response(cmd, Some(&mut rx_bytes))?;
+        SHT40Driver::<I2C, D>::parse_sensor_raw_measurement(rx_bytes,
+                                                            precision,
+                                                            false)
+    }
+
+    /// Get the results of a measurement, with temperature measured in the 
+    /// requested units. Relative humidity is unitless and always expressed as
+    /// a percent (%)
+    ///
+    /// The driver blocks for the max time the measurement can take, depending
+    /// on the requested Precision, waiting for the measurement results.
+    ///
+    /// # Arguments
+    ///
+    /// * `precision` - The precision with which to execute the measurement. 
+    ///                 Higher precision measurements take more time and consume
+    ///                 more power. Consult the Precision struct documentation
+    ///                 for details.
+    /// * `temp_unit` - The measurement unit to be used for temperature. You can
+    ///                 choose between TempUnit::Celsius and TempUnit::Farrenheit
+    ///
     pub fn get_temp_and_rh(&mut self, precision: Precision, temp_unit: TempUnit)
         -> Result<Measurement, Error<E>> {
         let mut rx_bytes = [0; 6];
@@ -321,8 +435,98 @@ where
         self.i2c_command_and_response(cmd, Some(&mut rx_bytes))?;
         SHT40Driver::<I2C, D>::parse_measurement(rx_bytes, precision, temp_unit, false)
     }
+    
+    /// Activate the SHT40 built-in heater with the specified power and duration
+    /// then perform a high-precision measurement just before deactivation.
+    ///
+    /// This can be used to remove condensed or sprayed water from the sensor's
+    /// surface, which make the sensor unresponsive to relative humidity changes
+    /// as long as there is still liquid water on the surface. Likewise, in
+    /// high-humidity environments this could allow creep-free measurements for
+    /// extended times.
+    ///
+    /// The on-chip heater of SHT40 is designed for a maximal duty cycle of less
+    /// than 5% (total heater-on time should not be longer than 5% of the
+    /// sensor's lifetime). It is the responsibility of the callers of this
+    /// function to keep track of this. 
+    ///
+    /// Additionally, the temperature sensor can be affected by the 
+    /// thermally-induced mechanical stress from the heater, ofsetting the
+    /// measured temperature. Likewise, any offsets which need to be applied
+    /// to the measured values are the responsibility of the user of this API.
+    ///
+    /// For more details, consult the sensor's datasheet or additional Sensirion
+    /// application notes.
+    ///
+    /// The driver blocks for the max time the heater is active, depending on
+    /// the requested HeaterDuration, in order to get the measurement results.
+    ///
+    /// # Arguments
+    ///
+    /// * `hpow` - The power at which the heater should be activated
+    /// * `hdur` - The duration for which the heater should be active. The
+    ///            longest (HeaterDuration::PulseLong) is ~ 1s. After this 
+    ///            duration, the heater is automatically deactivated.
+    /// * `temp_unit` - The measurement unit to be used for temperature in the
+    ///                 measurement taken just before the heater is deactivated.
+    ///                 You can choose between TempUnit::Celsius and 
+    ///                 TempUnit::Farrenheit
+    ///
+    pub fn set_heater_then_measure(&mut self, hpow: HeaterPower, hdur: HeaterDuration, temp_unit: TempUnit)
+        -> Result<Measurement, Error<E>> {
+        let mut rx_bytes = [0; 6];
+        let precision = Precision::High;
+        let cmd = Command::SetHeaterThenMeasureHighPrec(hpow, hdur);
+        self.i2c_command_and_response(cmd, Some(&mut rx_bytes))?;
+        SHT40Driver::<I2C, D>::parse_measurement(rx_bytes, precision, temp_unit, false)
+    }
+    
+    /// Activate the SHT40 built-in heater with the specified power and duration
+    /// then perform a high-precision measurement just before deactivation.
+    /// Similar to set_heater_then_measure but returns a RawMeasurement.
+    ///
+    /// Heater activation can be used to remove condensed or sprayed water 
+    /// from the sensor's surface, which make the sensor unresponsive to 
+    /// relative humidity changes as long as there is still liquid water on the
+    /// surface. Likewise, in high-humidity environments this could allow 
+    /// creep-free measurements for extended times.
+    ///
+    /// The on-chip heater of SHT40 is designed for a maximal duty cycle of less
+    /// than 5% (total heater-on time should not be longer than 5% of the
+    /// sensor's lifetime). It is the responsibility of the callers of this
+    /// function to keep track of this. 
+    ///
+    /// Additionally, the temperature sensor can be affected by the 
+    /// thermally-induced mechanical stress from the heater, ofsetting the
+    /// measured temperature. Likewise, any offsets which need to be applied
+    /// to the measured values are the responsibility of the user of this API.
+    ///
+    /// For more details, consult the sensor's datasheet or additional Sensirion
+    /// application notes.
+    ///
+    /// The driver blocks for the max time the heater is active, depending on
+    /// the requested HeaterDuration, in order to get the measurement results.
+    ///
+    /// # Arguments
+    ///
+    /// * `hpow` - The power at which the heater should be activated
+    /// * `hdur` - The duration for which the heater should be active. The
+    ///            longest (HeaterDuration::PulseLong) is ~ 1s. After this 
+    ///            duration, the heater is automatically deactivated.
+    ///
+    pub fn set_heater_then_measure_raw(&mut self, hpow: HeaterPower, hdur: HeaterDuration)
+        -> Result<RawMeasurement, Error<E>> {
+        let mut rx_bytes = [0; 6];
+        let precision = Precision::High;
+        let cmd = Command::SetHeaterThenMeasureHighPrec(hpow, hdur);
+        self.i2c_command_and_response(cmd, Some(&mut rx_bytes))?;
+        SHT40Driver::<I2C, D>::parse_sensor_raw_measurement(rx_bytes,
+                                                            precision,
+                                                            false)
+    }
 
-    pub fn get_sensor_serial(&mut self) -> Result<SerialNumber, Error<E>> {
+    /// Get the SHT40 sensor serial number
+    pub fn get_serial(&mut self) -> Result<SerialNumber, Error<E>> {
         let mut rx_bytes = [0; 6];
         let cmd = Command::GetSerialNumber;
         self.i2c_command_and_response(cmd, Some(&mut rx_bytes))?;
@@ -331,6 +535,18 @@ where
         let serial_b = ((rx_bytes[3] as u16) << 8)  + (rx_bytes[4] as u16);
 
         Ok(SerialNumber(serial_a, serial_b))
+    }
+
+    /// Perform a soft reset of the sensor. After this command, the user of the
+    /// API should wait for at least 1ms (the Soft reset time) before issuing
+    /// further commands. The driver itself does not block for this duration,
+    /// but just issues the soft reset command.
+    pub fn soft_reset_device(&mut self) -> Result<(), Error<E>> {
+        let cmd = Command::SoftReset;
+        let dev_cmd = cmd.as_device_command();
+        i2c::write_command_u8(&mut self.i2c, self.address, dev_cmd.cmd_code)
+            .map_err(|err| { Error::I2c(err) })?;
+        Ok(())
     }
 
 
@@ -395,7 +611,7 @@ mod tests {
 
         let mut sht40 = SHT40Driver::new(i2c_mock, SHT40_I2C_ADDR, DelayMock);
 
-        if let Ok(SerialNumber(a, b)) = sht40.get_sensor_serial() {
+        if let Ok(SerialNumber(a, b)) = sht40.get_serial() {
            assert_eq!(a, serial_a);
            assert_eq!(b, serial_b);
         }
@@ -419,6 +635,32 @@ mod tests {
 
         if let Ok(m) = sht40.get_temp_and_rh(Precision::High, tunit) {
            assert_eq!(m.temp_unit, tunit);
+           assert!(approx_eq!(f32, m.temp, temp, epsilon = 0.01));
+           assert!(approx_eq!(f32, m.rel_hum_percent, rel_hum, epsilon = 0.01));
+        }
+    }
+    
+    #[test]
+    fn test_sht40_heater_and_measurement() {
+        let temp: f32 = 23.8;
+        let tunit = TempUnit::Celsius;
+        let rel_hum: f32 = 65.2;
+        let hpow = HeaterPower::High;
+        let hdur = HeaterDuration::PulseShort;
+        let buf = gen_measurement_buf(temp, tunit, rel_hum); 
+
+        // Mock expected I2C transactions
+        let command_expectations = [
+            (Command::SetHeaterThenMeasureHighPrec(hpow, hdur), buf)
+        ];
+        let i2c_expectations = gen_mock_expectations(&command_expectations);
+        let i2c_mock = I2cMock::new(&i2c_expectations);
+
+        let mut sht40 = SHT40Driver::new(i2c_mock, SHT40_I2C_ADDR, DelayMock);
+
+        if let Ok(m) = sht40.set_heater_then_measure(hpow, hdur, tunit) {
+           assert_eq!(m.temp_unit, tunit);
+           assert_eq!(m.precision, Precision::High);
            assert!(approx_eq!(f32, m.temp, temp, epsilon = 0.01));
            assert!(approx_eq!(f32, m.rel_hum_percent, rel_hum, epsilon = 0.01));
         }

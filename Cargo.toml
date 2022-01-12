@@ -1,11 +1,12 @@
 [package]
 name = "sensor-temp-humidity-sht40"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Lucian Carata <luc@rez.how>"]
 license = "BSD-3-Clause OR Apache-2.0"
 description = "Driver for SHT40 temperature and humidity sensor"
 keywords = ["sht40", "sensirion", "embedded-hal-driver"]
 categories = ["embedded", "hardware-support", "no-std"]
+repository = "https://github.com/lc525/sensor-temp-humidity-sht40-rs"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
