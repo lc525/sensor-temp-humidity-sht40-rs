@@ -25,7 +25,9 @@
 /// ## Usage:
 ///
 /// Import this crate and an `embedded_hal` implementation, then instantiate the
-/// driver; For example, assuming you have connected a SH40 sensor to a linux
+/// driver; 
+///
+/// * For example, assuming you have connected a SH40 sensor to a linux
 /// machine and it is detected as an i2c device:
 ///
 /// ```ignore
@@ -47,6 +49,38 @@
 ///     }
 /// }
 /// ```
+///
+/// * Likewise, if you are using an ESP32-based board:
+///
+/// ```ignore
+/// use esp_idf_sys;
+/// use esp_idf_hal::delay;
+/// use esp_idf_hal::i2c;
+/// use esp_idf_hal::prelude::*;
+/// use sensor_temp_humidity_sht40::{SHT40Driver, I2CAddr, Precision, TempUnit};
+///
+/// fn main() {
+///     let peripherals = Peripherals::take().unwrap();
+///     let pins = peripherals.pins;
+///
+///     let i2c = peripherals.i2c0;
+///     let scl = pins.gpio9;
+///     let sda = pins.gpio8;
+///     let i2c_config = <i2c::config::MasterConfig as Default>::default()
+///                      .baudrate(400.kHz().into());
+///
+///     let mut sensor_drv = SHT40Driver::new(
+///         i2c::Master::<i2c::I2C0, _, _>::new(i2c, 
+///                                             i2c::MasterPins { sda, scl }, 
+///                                             i2c_config).unwrap(), 
+///         I2CAddr::SHT4x_A, 
+///         delay::Ets);
+///
+///     let measurement = sensor_drv.get_temp_and_rh(Precision::High,
+///                                                  TempUnit::Celsius);
+///     println!("Measurement {:#?}", measurement);
+/// }
+/// ```
 
 use embedded_hal as hal;
 
@@ -54,6 +88,10 @@ use hal::delay::blocking::DelayUs;
 use hal::i2c::blocking::{Read, Write, WriteRead};
 
 use sensirion_i2c::{crc8, i2c};
+
+const MAX_MILLICELSIUS_OFFSET:i16 = 17000;
+const MAX_MILLIFAHRENHEIT_OFFSET:i16 = 32000;
+const MAX_PCMHUM_OFFSET:i16 = 32000;
 
 // I2C Commands supported by the SHT40 sensor
 #[allow(non_camel_case_types)]
@@ -151,9 +189,16 @@ pub enum I2CAddr {
 /// unit transformation which might reduce accuracy.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum TempUnit {
-    Farrenheit,
-    Celsius,
+    MilliDegreesFahrenheit,
+    MilliDegreesCelsius,
 }
+
+
+#[derive(Debug, Clone, Copy)]
+pub struct TempOffset(i16, TempUnit);
+
+#[derive(Debug, Clone, Copy)]
+pub struct HumPcmOffset(i16);
 
 /// SHT40Driver is the main structure with which a user of this driver
 /// interracts. It is generic over two parameters implementing embedded_hal 
@@ -193,6 +238,8 @@ pub struct SHT40Driver<I2c, Delay> {
     i2c: I2c,
     address: u8,
     delay: Delay,
+    temp_offset: Option<TempOffset>,
+    hum_pcm_offset: Option<HumPcmOffset>,
 }
 
 #[derive(Debug)]
@@ -203,6 +250,11 @@ pub enum Error<E> {
     Crc,
     /// Error while blocking for set delay (typically waiting for I2C response)
     DelayError,
+}
+
+#[derive(Debug)]
+pub enum CalibrationError {
+    OffsetTooLarge,
 }
 
 impl<E, I2cWrite, I2cRead> From<i2c::Error<I2cWrite, I2cRead>> for Error<E>
@@ -230,14 +282,14 @@ struct DeviceCommand {
 ///
 /// You obtain a measurement by calling get_temp_and_rh(...) or 
 /// set_heater_then_measure(...) on an instance of SHT40Driver.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub struct Measurement {
     /// Measured temperature
-    pub temp: f32,
-    /// Unit of temperature measurement (C or F)
+    pub temp: i32,
+    /// Unit of temperature measurement (milliC or milliF)
     pub temp_unit: TempUnit,
-    /// Measured relative humidity (%)
-    pub rel_hum_percent: f32,
+    /// Measured relative humidity (pcm = percent mille = per 100_000)
+    pub rel_hum_pcm: u32,
     /// The precision that was requested when performing the measurement.
     /// For measurements obtained through set_heater_then_measure(...),
     /// the sensor automatically performs a Precision::High measurement.
@@ -329,7 +381,53 @@ where
     ///             the sensor to respond to a measurement request or for the
     ///             heater to be deactivated.
     pub fn new(i2c: I2C, address: I2CAddr, delay: D) -> Self {
-        SHT40Driver { i2c, address: address as u8, delay }
+        SHT40Driver { i2c, 
+                      address: address as u8, 
+                      delay, 
+                      temp_offset: None, 
+                      hum_pcm_offset: None }
+    }
+
+    pub fn set_temp_offset(&mut self, offset: TempOffset) -> Result<(), CalibrationError> {
+        let too_large = match offset.1 {
+            TempUnit::MilliDegreesCelsius => { 
+                if offset.0.abs() > MAX_MILLICELSIUS_OFFSET { 
+                    true 
+                } else { 
+                    false 
+                } 
+            },
+            TempUnit::MilliDegreesFahrenheit => { 
+                if offset.0.abs() > MAX_MILLIFAHRENHEIT_OFFSET { 
+                    true 
+                } else { 
+                    false
+                } 
+            }
+        };
+        if !too_large {
+            self.temp_offset = Some(offset);
+            Ok(())
+        } else {
+            Err(CalibrationError::OffsetTooLarge)
+        }
+    }
+
+    pub fn clear_temp_offset(&mut self) {
+        self.temp_offset = None;
+    }
+
+    pub fn set_hum_offset(&mut self, offset: HumPcmOffset) -> Result<(), CalibrationError> {
+        if offset.0.abs() < MAX_PCMHUM_OFFSET {
+            self.hum_pcm_offset = Some(offset);
+            Ok(())
+        } else {
+            Err(CalibrationError::OffsetTooLarge)
+        }
+    }
+    
+    pub fn clear_hum_offset(&mut self) {
+        self.hum_pcm_offset = None;
     }
 
     fn parse_sensor_raw_measurement(rx_bytes: [u8; 6], precision: Precision, check_crc: bool)
@@ -344,34 +442,14 @@ where
             Ok(RawMeasurement { temp_ticks, rel_hum_ticks, precision })
         }
 
-    fn convert_raw_to_units(raw_meas: RawMeasurement, temp_unit: TempUnit) -> Measurement {
-        let mut rel_hum_percent = -6.0 + 125.0 * (raw_meas.rel_hum_ticks as f32)/65535.0;
 
-        // calibration may result in non-physical values which according to the
-        // datasheet are only of interest when comparing the distribution of results
-        // between multiple sensors:
-        if rel_hum_percent > 100.0 { rel_hum_percent = 100.0; }
-        if rel_hum_percent < 0.0 { rel_hum_percent = 0.0; }
-
-        let temp = match temp_unit {
-            TempUnit::Celsius => -45.0 + 175.0 * (raw_meas.temp_ticks as f32)/65535.0,
-            TempUnit::Farrenheit => -49.0 + 315.0 * (raw_meas.temp_ticks as f32)/65535.0
-        };
-
-        Measurement {
-            temp,
-            temp_unit,
-            rel_hum_percent,
-            precision: raw_meas.precision
-        }
-    }
-
-    fn parse_measurement(rx_bytes: [u8; 6], precision: Precision, temp_unit: TempUnit, check_crc: bool)
+    fn parse_measurement(rx_bytes: [u8; 6], precision: Precision, temp_unit: TempUnit,
+                         check_crc: bool, temp_offset: Option<i16>, hum_pcm_offset: Option<i16>)
         -> Result<Measurement, Error<E>> {
             let raw = SHT40Driver::<I2C, D>::parse_sensor_raw_measurement(rx_bytes,
                                                               precision,
                                                               check_crc)?;
-            Ok(SHT40Driver::<I2C, D>::convert_raw_to_units(raw, temp_unit))
+            Ok(convert_raw_to_units(raw, temp_unit, temp_offset, hum_pcm_offset))
     }
 
     fn i2c_command_and_response(&mut self, cmd: Command, rx_bytes: Option<&mut [u8]>)
@@ -391,6 +469,10 @@ where
     /// Get the results of a measurement in raw sensor format (ticks). Please
     /// consult the sensor datasheet for transformations which can be applied
     /// to this raw data to get temperature and humidity values.
+    ///
+    /// No offsets set using `set_temp_offset` or `set_hum_offset` are applied,
+    /// as it is assumed the user of the API fully deals with any calibration
+    /// required beyond the one done on the sensor itself
     ///
     /// The driver blocks for the max time the measurement can take, depending
     /// on the requested Precision, waiting for the measurement results.
@@ -412,9 +494,85 @@ where
                                                             false)
     }
 
+
+    /// The calibration offset and the measurement units are provided 
+    /// independently by users of this API. For example, the offset might
+    /// be set in milli degrees Fahrenheit, but the measurement is done in
+    /// milli degrees Celsius.
+    ///
+    /// Although this is not necessarily recommended because the need of
+    /// a further fixed-precision conversion of the offset, the API supports
+    /// the scenario by detecting the mismatch and converting.
+    ///
+    /// This is not a classical conversion of the offset from milliFahrenheit
+    /// to milliCelsius, because we're interested in the finite difference
+    /// (in a mathematical sense). If C is the temperature in Celsius and f(C)
+    /// is the conversion in Fahrenheit, we have:
+    ///
+    /// ```ignore
+    ///
+    /// f(C) = 9/5 * C + 32
+    /// f(C + off) = 9/5 * (C + off) + 32
+    /// 
+    /// ```
+    ///
+    /// Therefore, for an offset of "off" we have
+    /// 
+    /// ```ignore
+    /// 
+    /// f(C + off) - f(C) = 9/5 * off =>
+    /// f(C + off) - f(C) = 1.8 * off
+    /// 
+    /// ```
+    ///
+    /// This means that applying the offset 'off' to the the Celsius temperature
+    /// is equivalent to applying the offset 9/5 * off to the Fahrenheit 
+    /// temperature
+    ///
+    /// The function below implements exactly that using fixed precision
+    /// arithmetic.
+    ///
+    fn convert_temp_offset(temp_off: Option<TempOffset>, to_unit: TempUnit, 
+                           hum_pcm_off: Option<HumPcmOffset>) 
+        -> (Option<i16>, Option<i16>) {
+        let temp_offset: Option<i16>;
+        let hum_offset: Option<i16>;
+        
+        if let Some(t_off) = temp_off {
+            if t_off.1 != to_unit {
+               temp_offset = match to_unit {
+                   TempUnit::MilliDegreesCelsius => {
+                       // t_off.0 in milliFahrenheit, convert to milliCelsius
+                       Some(((t_off.0 as i32) * 555 / 1000) as i16)
+                       
+                   },
+                   TempUnit::MilliDegreesFahrenheit => {
+                       // t_off.0 delta in milliCelsius, convert to 
+                       // milliFahrenheit offset
+                       Some(((t_off.0 as i32) * 18 / 10) as i16)
+                   }
+               }
+            } else {
+                temp_offset = Some(t_off.0);
+            }
+        } else {
+            temp_offset = None;
+        }
+        hum_offset = hum_pcm_off.map(|off|{ off.0 });
+        (temp_offset, hum_offset)
+    }
+
     /// Get the results of a measurement, with temperature measured in the 
-    /// requested units. Relative humidity is unitless and always expressed as
-    /// a percent (%)
+    /// requested units (milli degrees C or milli degrees F).
+    ///
+    /// Relative humidity is unitless and always reported as
+    /// pcm (percent mille = per 100_000).
+    ///
+    /// You can easily convert into degrees C, degrees F (for temp) and percent
+    /// (%) for relative humidity by dividing the returned values by 1000. They
+    /// are stored as milli-* so that all internal conversions can be done using
+    /// integer arithmetic, without loss of precision. That way, MCUs without
+    /// a floating-point unit are supported.
     ///
     /// The driver blocks for the max time the measurement can take, depending
     /// on the requested Precision, waiting for the measurement results.
@@ -426,14 +584,20 @@ where
     ///                 more power. Consult the Precision struct documentation
     ///                 for details.
     /// * `temp_unit` - The measurement unit to be used for temperature. You can
-    ///                 choose between TempUnit::Celsius and TempUnit::Farrenheit
+    ///                 choose between TempUnit::MilliDegreesCelsius and 
+    ///                 TempUnit::MilliDegreesFahrenheit
     ///
     pub fn get_temp_and_rh(&mut self, precision: Precision, temp_unit: TempUnit)
         -> Result<Measurement, Error<E>> {
         let mut rx_bytes = [0; 6];
         let cmd = Command::MeasureTempAndHumidity(precision);
         self.i2c_command_and_response(cmd, Some(&mut rx_bytes))?;
-        SHT40Driver::<I2C, D>::parse_measurement(rx_bytes, precision, temp_unit, false)
+        let (temp_offset, hum_offset) = 
+            SHT40Driver::<I2C, D>::convert_temp_offset(self.temp_offset, 
+                                                       temp_unit, 
+                                                       self.hum_pcm_offset);
+        SHT40Driver::<I2C, D>::parse_measurement(rx_bytes, precision, temp_unit,
+                                                 false, temp_offset, hum_offset)
     }
     
     /// Activate the SHT40 built-in heater with the specified power and duration
@@ -469,8 +633,8 @@ where
     ///            duration, the heater is automatically deactivated.
     /// * `temp_unit` - The measurement unit to be used for temperature in the
     ///                 measurement taken just before the heater is deactivated.
-    ///                 You can choose between TempUnit::Celsius and 
-    ///                 TempUnit::Farrenheit
+    ///                 You can choose between TempUnit::MilliDegreesCelsius and 
+    ///                 TempUnit::MilliDegreesFahrenheit
     ///
     pub fn set_heater_then_measure(&mut self, hpow: HeaterPower, hdur: HeaterDuration, temp_unit: TempUnit)
         -> Result<Measurement, Error<E>> {
@@ -478,7 +642,12 @@ where
         let precision = Precision::High;
         let cmd = Command::SetHeaterThenMeasureHighPrec(hpow, hdur);
         self.i2c_command_and_response(cmd, Some(&mut rx_bytes))?;
-        SHT40Driver::<I2C, D>::parse_measurement(rx_bytes, precision, temp_unit, false)
+        let (temp_offset, hum_offset) = 
+            SHT40Driver::<I2C, D>::convert_temp_offset(self.temp_offset, 
+                                                       temp_unit, 
+                                                       self.hum_pcm_offset);
+        SHT40Driver::<I2C, D>::parse_measurement(rx_bytes, precision, temp_unit,
+                                                 false, temp_offset, hum_offset)
     }
     
     /// Activate the SHT40 built-in heater with the specified power and duration
@@ -498,11 +667,16 @@ where
     ///
     /// Additionally, the temperature sensor can be affected by the 
     /// thermally-induced mechanical stress from the heater, ofsetting the
-    /// measured temperature. Likewise, any offsets which need to be applied
-    /// to the measured values are the responsibility of the user of this API.
+    /// measured temperature. If you want a more accurate temperature 
+    /// measurement, it is recommended you wait ~1s after calling this function
+    /// and then get another normal measurement (not activating the heater).
     ///
     /// For more details, consult the sensor's datasheet or additional Sensirion
     /// application notes.
+    ///
+    /// No offsets set using `set_temp_offset` or `set_hum_offset` are applied,
+    /// as it is assumed the user of the API fully deals with any calibration
+    /// required beyond the one done on the sensor itself
     ///
     /// The driver blocks for the max time the heater is active, depending on
     /// the requested HeaterDuration, in order to get the measurement results.
@@ -552,10 +726,100 @@ where
 
 }
 
+
+///
+/// The SHT40 sensor uses a 16-bit ADC for converting the analog 
+/// measurements into data, which is then calibrated on-sensor and then 
+/// sent via I2C. In the raw measurement, temp_ticks and rel_hum_ticks are
+/// direct outputs after the calibration process and take values in the
+/// [0 .. 2^16 - 1] interval.
+///
+/// In order to convert the ticks into usable values, we map this interval
+/// onto the following intervals:
+///
+/// For temp. in Celsius: [-45 .. 130]
+/// For temp. in Fahrenheit: [-49 .. 266] (equivalent to the C interval)
+/// For humidity (in %): [-6 .. 119], with values below 0 and above 100 not
+///                                   having physical meaning.
+///
+/// Mathematically, this means that if a and b are the limits of the interval
+/// [a .. b] for a particular metric (temp in C, temp in F, humidity) then 
+/// the value of the metric, M is computed according to:
+///
+/// ```ignore
+///
+///     (b - a) * Mticks 
+/// M = ----------------- + a                                       (1)
+///          2^16 - 1
+/// ```
+///
+/// However, we will not directly implement this formula but optimise it
+/// for fixed-point algebra. Therefore, the Measurement will hold only
+/// integer values rather than floating-point ones, and instead of the
+/// typical measurement units (C, F or %) we will output values 1000-times
+/// greater (units in milliC, milliF, pcm). 
+///
+/// Concretely, a temperature of 23.5 C will be returned as 23500 milliC and
+/// a humidity of 45.64 % will be returned as 45640 pcm (part per 100_000)
+///
+/// We write (1) as:
+///
+/// ```ignore
+///
+///               (b - a) * 1000 * Mticks
+/// M * 1000 = ---------------------------- + (a * 1000)           (2)
+///                    (               1  )
+///              2^i * ( 2^(16-i) -  -----)
+///                    (              2^i )
+/// ```
+///
+/// and we search for i that minimizes the fractional part, implementing the
+/// first division by 2^i as a bit shifit and the pre-computing an integer
+/// for ((b - a) * 1000) / (2^(16-i) - 1/2^i)
+/// 
+/// User provided offsets for temp and humidity can be used when externally
+/// calibrating the sensor. It is assumed that the unit for temp_offset is
+/// the same as temp_unit and that hum_pcm_offset is expressed in per cent 
+/// mille (pcm, part per 100_000).
+///
+/// The relative humidity returned as part of the measurement result is set to
+/// 0 if negative and to 100_000 if greater than 100_000 pcm (100%)
+/// 
+pub fn convert_raw_to_units(raw_meas: RawMeasurement, temp_unit: TempUnit,
+                            temp_offset: Option<i16>, hum_pcm_offset: Option<i16>)
+    -> Measurement {
+
+    let temp_offset = temp_offset.unwrap_or(0);
+    let hum_pcm_offset = hum_pcm_offset.unwrap_or(0);
+
+    // compute (2) with a = -6, b = 119, i = 13
+    let mut rel_hum_pcm = ((15625 * (raw_meas.rel_hum_ticks as i32)) >> 13) - 6000;
+    rel_hum_pcm = rel_hum_pcm + (hum_pcm_offset as i32);
+
+    // calibration may result in non-physical values which according to the
+    // datasheet are only of interest when comparing the distribution of results
+    // between multiple sensors:
+    if rel_hum_pcm > 100000 { rel_hum_pcm = 100000; }
+    if rel_hum_pcm < 0 { rel_hum_pcm = 0; }
+
+    let temp = match temp_unit {
+        // compute (2) with a = -45, b = 130, i = 13
+        TempUnit::MilliDegreesCelsius =>  ((21875 * (raw_meas.temp_ticks as i32)) >> 13) - 45000,
+        // compute (2) with a = -49, b = 266, i = 14
+        TempUnit::MilliDegreesFahrenheit => ((78751 * (raw_meas.temp_ticks as i32)) >> 14) - 49000
+    };
+
+
+    Measurement {
+        temp: temp + (temp_offset as i32),
+        temp_unit,
+        rel_hum_pcm: rel_hum_pcm as u32,
+        precision: raw_meas.precision
+    }
+}
 #[cfg(test)]
 mod tests {
     use embedded_hal_mock as hal;
-    use float_cmp::approx_eq;
 
     use self::hal::delay::MockNoop as DelayMock;
     use self::hal::i2c::{Mock as I2cMock, Transaction};
@@ -563,13 +827,13 @@ mod tests {
 
     const SHT40_I2C_ADDR: I2CAddr = I2CAddr::SHT4x_A;
 
-    fn gen_measurement_buf(temp: f32, tunit: TempUnit, rel_hum: f32) -> [u8; 6] {
-        let rel_hum_ticks = ((rel_hum + 6.0) / 125.0 * 65535.0) as u16;
+    fn gen_measurement_buf(temp: i32, tunit: TempUnit, rel_hum_pcm: u32) -> [u8; 6] {
+        let rel_hum_ticks = (((rel_hum_pcm + 6000) << 13) / 15625) as u16;
         let rel_temp_ticks;
-        if tunit == TempUnit::Celsius {
-            rel_temp_ticks = ((temp + 45.0) / 175.0 * 65535.0) as u16;
+        if tunit == TempUnit::MilliDegreesCelsius {
+            rel_temp_ticks = (((temp + 45000) << 13 ) / 21875 ) as u16;
         } else {
-            rel_temp_ticks = ((temp + 49.0) / 315.0 * 65535.0) as u16;
+            rel_temp_ticks = (((temp + 49000) << 14) / 78751 ) as u16;
         }
         let temp_buf = rel_temp_ticks.to_be_bytes();
         let temp_crc = crc8::calculate(&temp_buf);
@@ -619,10 +883,10 @@ mod tests {
 
     #[test]
     fn test_sht40_measurement() {
-        let temp: f32 = 23.8;
-        let tunit = TempUnit::Celsius;
-        let rel_hum: f32 = 65.2;
-        let buf = gen_measurement_buf(temp, tunit, rel_hum); 
+        let temp: i32 = 20625;
+        let tunit = TempUnit::MilliDegreesCelsius;
+        let rel_hum_pcm: u32 = 9625;
+        let buf = gen_measurement_buf(temp, tunit, rel_hum_pcm); 
 
         // Mock expected I2C transactions
         let command_expectations = [
@@ -635,19 +899,62 @@ mod tests {
 
         if let Ok(m) = sht40.get_temp_and_rh(Precision::High, tunit) {
            assert_eq!(m.temp_unit, tunit);
-           assert!(approx_eq!(f32, m.temp, temp, epsilon = 0.01));
-           assert!(approx_eq!(f32, m.rel_hum_percent, rel_hum, epsilon = 0.01));
+           assert_eq!(m.temp, temp);
+           assert_eq!(m.rel_hum_pcm, rel_hum_pcm);
         }
     }
     
     #[test]
+    fn test_sht40_measurement_with_offset_conversion() {
+        let cmp_eps = 5;
+        let temp_f: i32 = 77000;
+        let temp_c: i32 = 25000;
+        let tfunit = TempUnit::MilliDegreesFahrenheit;
+        let tcunit = TempUnit::MilliDegreesCelsius;
+        let rel_hum_pcm: u32 = 9625;
+        let buf = gen_measurement_buf(temp_f, tfunit, rel_hum_pcm); 
+        let buf_2 = gen_measurement_buf(temp_c, tcunit, rel_hum_pcm); 
+
+        // Mock expected I2C transactions
+        let command_expectations = [
+            (Command::MeasureTempAndHumidity(Precision::High), buf),
+            (Command::MeasureTempAndHumidity(Precision::High), buf_2)
+        ];
+        let i2c_expectations = gen_mock_expectations(&command_expectations);
+        let i2c_mock = I2cMock::new(&i2c_expectations);
+
+        let mut sht40 = SHT40Driver::new(i2c_mock, SHT40_I2C_ADDR, DelayMock);
+        let mut t1_offset:i16 = -5000;
+        sht40.set_temp_offset(TempOffset(t1_offset, TempUnit::MilliDegreesCelsius)).unwrap();
+        let h1_offset:i16 = -1200;
+        sht40.set_hum_offset(HumPcmOffset(h1_offset)).unwrap();
+
+        if let Ok(m) = sht40.get_temp_and_rh(Precision::High, tfunit) {
+           assert_eq!(m.temp_unit, tfunit);
+           assert!((m.temp >= 68000 - cmp_eps) && (m.temp <= 68000 + cmp_eps));
+           assert_eq!(m.rel_hum_pcm, rel_hum_pcm - 1200);
+           sht40.clear_temp_offset();
+           sht40.clear_hum_offset();
+        }
+        
+        t1_offset = -9000;
+        sht40.set_temp_offset(TempOffset(t1_offset, TempUnit::MilliDegreesFahrenheit)).unwrap();
+        if let Ok(m) = sht40.get_temp_and_rh(Precision::High, tcunit) {
+           assert_eq!(m.temp_unit, tcunit);
+           assert!((m.temp >= 20000 - cmp_eps) && (m.temp <= 20000 + cmp_eps));
+           assert_eq!(m.rel_hum_pcm, rel_hum_pcm);
+        }
+
+    }
+    
+    #[test]
     fn test_sht40_heater_and_measurement() {
-        let temp: f32 = 23.8;
-        let tunit = TempUnit::Celsius;
-        let rel_hum: f32 = 65.2;
+        let temp: i32 = 20625;
+        let tunit = TempUnit::MilliDegreesCelsius;
+        let rel_hum_pcm: u32 = 9625;
         let hpow = HeaterPower::High;
         let hdur = HeaterDuration::PulseShort;
-        let buf = gen_measurement_buf(temp, tunit, rel_hum); 
+        let buf = gen_measurement_buf(temp, tunit, rel_hum_pcm); 
 
         // Mock expected I2C transactions
         let command_expectations = [
@@ -661,8 +968,10 @@ mod tests {
         if let Ok(m) = sht40.set_heater_then_measure(hpow, hdur, tunit) {
            assert_eq!(m.temp_unit, tunit);
            assert_eq!(m.precision, Precision::High);
-           assert!(approx_eq!(f32, m.temp, temp, epsilon = 0.01));
-           assert!(approx_eq!(f32, m.rel_hum_percent, rel_hum, epsilon = 0.01));
+           assert_eq!(m.temp, temp);
+           assert_eq!(m.rel_hum_pcm, rel_hum_pcm);
+        }
+    }
         }
     }
 }
