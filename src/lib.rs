@@ -315,7 +315,7 @@ impl Command {
             Command::SoftReset => DeviceCommand { cmd_code: 0x94,
                                                   max_duration_ms: 1 },
             Command::GetSerialNumber => DeviceCommand { cmd_code: 0x89,
-                                                        max_duration_ms: 0 },
+                                                        max_duration_ms: 1 },
             Command::MeasureTempAndHumidity(prec) => {
                 match prec {
                     Precision::High => DeviceCommand { cmd_code: 0xFD,
