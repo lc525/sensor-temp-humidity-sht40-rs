@@ -25,16 +25,19 @@ SHT45) but this has not been tested.
 
   `cargo build --feature fp --release`
 
-  The driver stores measurements in milli degrees Celsius or milli degrees
-  Fahrenheit for temperature and in per cent mille (pcm) for relative 
-  humidity, and does conversions using fixed-point arithmetic to minimise
-  loss of precision. Therefore, a temperature of 23.89 degrees Celsius will
-  be stored as 23890 and and a humidity of 56.2% is stored as 56200.
+  By default, instead of SI units, the driver stores measurements in 
+  milli degrees Celsius or milli degrees Fahrenheit for temperature and in per 
+  cent mille (pcm) for relative humidity, doing conversions using fixed-point
+  arithmetic.
 
-  The fp feature adds data structures and a function for converting a
-  Measurement structure to a SIMeasurement structure, converting to floating
-  point as the very last step (after any other calibration offsets have
-  been applied to the measured values).
+  A temperature of 23.89 degrees Celsius will be stored as 23890 and
+  and a humidity of 56.2% will be stored as 56200.
+
+  With the fp feature, users of the API can directly convert back to SI units 
+  using an utility function which takes a Measurement and returns an
+  SIMeasurement. Unless you need this convenience, it is probably best not to
+  enable "fp" and propagate values as integers until just before displaying them
+  to an end-user.
 
 ## Usage
 
