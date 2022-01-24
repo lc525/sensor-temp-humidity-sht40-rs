@@ -105,11 +105,11 @@ use hal::blocking::i2c::{Read, Write, WriteRead};
 
 use sensirion_i2c::{crc8, i2c};
 
-const MAX_MILLICELSIUS_OFFSET:i16 = 17000;
-const MAX_MILLIFAHRENHEIT_OFFSET:i16 = 32000;
-const MAX_PCMHUM_OFFSET:i16 = 32000;
+pub const MAX_MILLICELSIUS_OFFSET:i16 = 17000;
+pub const MAX_MILLIFAHRENHEIT_OFFSET:i16 = 32000;
+pub const MAX_PCMHUM_OFFSET:i16 = 32000;
 
-// I2C Commands supported by the SHT40 sensor
+/// I2C Commands supported by the SHT40 driver
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy)]
 enum Command {
@@ -160,6 +160,7 @@ pub enum Precision {
     Low
 }
 
+/// Define the power at which the built-in heater should be operated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeaterPower {
     /// High is typically 200mW (for VDD=3.3V)
@@ -172,6 +173,9 @@ pub enum HeaterPower {
     Low,
 }
 
+/// Define the duration for which the built-in heater should be turned on. After
+/// that time, the heater automatically turns off, without the need for any
+/// additional I2C commands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeaterDuration {
     /// PulseLong is typically 1s (max 1.1s)
@@ -209,6 +213,9 @@ pub enum TempUnit {
     MilliDegreesCelsius,
 }
 
+/// SI Measurement unit for Temperature.
+///
+/// Used only with `SIMeasurement` when the fp feature is enabled
 #[cfg(feature="fp")]
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum SITempUnit {
@@ -216,9 +223,20 @@ pub enum SITempUnit {
     Celsius,
 }
 
+/// Temperature offset to be applied to sensor measurement after conversion from
+/// raw value. This can be used to apply external calibration, beyond what
+/// is automatically done on-sensor.
+///
+/// Here, TempUnit refers to the unit of the offset (delta). If the measurement
+/// values are requested in a different TempUnit, this offset will be 
+/// automatically transformed so that it can be correctly applied to values in
+/// the different TempUnit.
 #[derive(Debug, Clone, Copy)]
 pub struct TempOffset(i16, TempUnit);
 
+/// Humidity PCM offset to be applied to sensor measurement after conversion
+/// from raw value. This can be used to apply external calibration, beyond what
+/// is automatically done on-sensor.
 #[derive(Debug, Clone, Copy)]
 pub struct HumPcmOffset(i16);
 
@@ -264,6 +282,8 @@ pub struct SHT40Driver<I2c, Delay> {
     hum_pcm_offset: Option<HumPcmOffset>,
 }
 
+/// Driver error type parameterised to support hal-specific communication error
+/// subtypes
 #[derive(Debug)]
 pub enum Error<E> {
     /// Error on the I2C bus
@@ -274,9 +294,12 @@ pub enum Error<E> {
     DelayError,
 }
 
+/// Driver error type independent of hal-specific types. 
 #[derive(Debug)]
-pub enum CalibrationError {
-    OffsetTooLarge,
+pub enum SHT40Error {
+    /// The offset applied is too large to be supported. This is returned to
+    /// avoid fixed-point arithmetic overflow errors.
+    CalibrationOffsetTooLarge,
 }
 
 impl<E, I2cWrite, I2cRead> From<i2c::Error<I2cWrite, I2cRead>> for Error<E>
@@ -293,7 +316,9 @@ where
     }
 }
 
-
+/// I2C command code and maximum duration required for the sensor to respond
+/// to that particular command (wait time). If a I2C read is issued before
+/// max_duration_ms, the sensor may respond with NACK.
 #[derive(Clone, Copy)]
 struct DeviceCommand {
     cmd_code: u8,
@@ -318,6 +343,11 @@ pub struct Measurement {
     pub precision: Precision,
 }
 
+/// A sensor SI measurement result.
+///
+/// This is obtained by calling `convert_measurement_to_si` with an existing
+/// Measurement object. Only available whem the "fp" feature is enabled as 
+/// temperature and relative humidity (%) are stored as floating point numbers.
 #[cfg(feature="fp")]
 #[derive(Debug, Clone, Copy)]
 pub struct SIMeasurement {
@@ -421,7 +451,18 @@ where
                       hum_pcm_offset: None }
     }
 
-    pub fn set_temp_offset(&mut self, offset: TempOffset) -> Result<(), CalibrationError> {
+    /// Set a temperature offset that is automatically added to the value 
+    /// measured by the sensor for measurements (not raw only).
+    ///
+    /// This call will fail if the absolute value of TempOffset is larger than 
+    /// a pre-defined constant, depending on the TempUnit:
+    ///
+    /// MAX_MILLICELSIUS_OFFSET for TempUnit::MilliDegreesCelsius and
+    /// MAX_MILLIFAHRENHEIT_OFFSET for TempUnit::MilliDegreesFahrenheit
+    ///
+    /// This is to avoid overlows during fixed-point arithmetic operations
+    /// involving the offset.
+    pub fn set_temp_offset(&mut self, offset: TempOffset) -> Result<(), SHT40Error> {
         let too_large = match offset.1 {
             TempUnit::MilliDegreesCelsius => { 
                 if offset.0.abs() > MAX_MILLICELSIUS_OFFSET { 
@@ -442,27 +483,40 @@ where
             self.temp_offset = Some(offset);
             Ok(())
         } else {
-            Err(CalibrationError::OffsetTooLarge)
+            Err(SHT40Error::CalibrationOffsetTooLarge)
         }
     }
 
+    /// Clear any previously set temperature offset
     pub fn clear_temp_offset(&mut self) {
         self.temp_offset = None;
     }
 
-    pub fn set_hum_offset(&mut self, offset: HumPcmOffset) -> Result<(), CalibrationError> {
+    /// Set a humidity offset that is automatically added to the value 
+    /// measured by the sensor for measurements (not raw only).
+    ///
+    /// This call will fail if the absolute value of TempOffset is larger than 
+    /// a pre-defined constant, MAX_PCMHUM_OFFSET
+    ///
+    /// This is to avoid overlows during fixed-point arithmetic operations
+    /// involving the offset.
+    pub fn set_hum_offset(&mut self, offset: HumPcmOffset) -> Result<(), SHT40Error> {
         if offset.0.abs() < MAX_PCMHUM_OFFSET {
             self.hum_pcm_offset = Some(offset);
             Ok(())
         } else {
-            Err(CalibrationError::OffsetTooLarge)
+            Err(SHT40Error::CalibrationOffsetTooLarge)
         }
     }
     
+    /// Clear any previously set humidity offset
     pub fn clear_hum_offset(&mut self) {
         self.hum_pcm_offset = None;
     }
-
+    
+    /// Utility function for parsing the raw I2C sensor output buffer
+    ///
+    /// [not part of public API]
     fn parse_sensor_raw_measurement(rx_bytes: [u8; 6], precision: Precision, check_crc: bool)
         -> Result<RawMeasurement, Error<E>> {
             let temp_ticks = ((rx_bytes[0] as u16) << 8)  + (rx_bytes[1] as u16);
@@ -476,6 +530,15 @@ where
         }
 
 
+    /// Utility function for parsing the raw I2C sensor output buffer and
+    /// converting the temperature in the requested unit.
+    ///
+    /// This also applies the given offsets if provided, assuming that 
+    /// temp_offset is already converted for addition to a temperature in the
+    /// same unit as temp_unit. The humidity offset is assumed to be given
+    /// in pcm (per cent mille).
+    ///
+    /// [not part of public API]
     fn parse_measurement(rx_bytes: [u8; 6], precision: Precision, temp_unit: TempUnit,
                          check_crc: bool, temp_offset: Option<i16>, hum_pcm_offset: Option<i16>)
         -> Result<Measurement, Error<E>> {
@@ -485,6 +548,8 @@ where
             Ok(convert_raw_to_units(raw, temp_unit, temp_offset, hum_pcm_offset))
     }
 
+    /// Issue I2C command, wait for the maximum time it might take the sensor
+    /// to respond to that particular command, then read the response buffer.
     fn i2c_command_and_response(&mut self, cmd: Command, rx_bytes: Option<&mut [u8]>)
         -> Result<(), Error<E>>{
         let dev_cmd = cmd.as_device_command();
@@ -847,6 +912,8 @@ pub fn convert_raw_to_units(raw_meas: RawMeasurement, temp_unit: TempUnit,
     }
 }
 
+/// Converts a Measurement to a SIMeasurement (containing floating-point
+/// values) using SI units. Requires the "fp" feature.
 #[cfg(feature="fp")]
 pub fn convert_measurement_to_si(meas: Measurement) -> SIMeasurement {
     SIMeasurement {
