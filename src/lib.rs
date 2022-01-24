@@ -22,6 +22,23 @@
 /// Any sensor-related data quoted in this documentation are orientative and are 
 /// taken from Version 2 - July 2021 of the datasheet
 ///
+/// ## Features
+///
+/// - "fp": enable this feature if your CPU or MCU has a floating-point unit
+///   and you want to be able to convert measured values to SI units (degrees
+///   Celsius, degreed Fahrenheit for temperature and % for relative humidity).
+///
+///   The driver stores measurements in milli degrees Celsius or milli degrees
+///   Fahrenheit for temperature and in per cent mille (pcm) for relative 
+///   humidity, and does conversions using fixed-point arithmetic to minimise
+///   loss of precision. Therefore, a temperature of 23.89 degrees Celsius will
+///   be stored as 23890 and and a humidity of 56.2% is stored as 56200.
+///
+///   The fp feature adds data structures and a function for converting a
+///   Measurement structure to a SIMeasurement structure, converting to floating
+///   point as the very last step (after any other calibration offsets have
+///   been applied to the measured values).
+///
 /// ## Usage:
 ///
 /// Import this crate and an `embedded_hal` implementation, then instantiate the
@@ -193,6 +210,12 @@ pub enum TempUnit {
     MilliDegreesCelsius,
 }
 
+#[cfg(feature="fp")]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum SITempUnit {
+    Fahrenheit,
+    Celsius,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct TempOffset(i16, TempUnit);
@@ -290,6 +313,21 @@ pub struct Measurement {
     pub temp_unit: TempUnit,
     /// Measured relative humidity (pcm = percent mille = per 100_000)
     pub rel_hum_pcm: u32,
+    /// The precision that was requested when performing the measurement.
+    /// For measurements obtained through set_heater_then_measure(...),
+    /// the sensor automatically performs a Precision::High measurement.
+    pub precision: Precision,
+}
+
+#[cfg(feature="fp")]
+#[derive(Debug, Clone, Copy)]
+pub struct SIMeasurement {
+    /// Measured temperature
+    pub temp: f32,
+    /// Unit of temperature measurement (C or F)
+    pub temp_unit: SITempUnit,
+    /// Measured relative humidity (%)
+    pub rel_hum_percent: f32,
     /// The precision that was requested when performing the measurement.
     /// For measurements obtained through set_heater_then_measure(...),
     /// the sensor automatically performs a Precision::High measurement.
@@ -718,8 +756,6 @@ where
             .map_err(|err| { Error::I2c(err) })?;
         Ok(())
     }
-
-
 }
 
 
@@ -813,6 +849,21 @@ pub fn convert_raw_to_units(raw_meas: RawMeasurement, temp_unit: TempUnit,
         precision: raw_meas.precision
     }
 }
+
+#[cfg(feature="fp")]
+pub fn convert_measurement_to_si(meas: Measurement) -> SIMeasurement {
+    SIMeasurement {
+        temp: (meas.temp as f32) / 1000.0,
+        temp_unit: match meas.temp_unit {
+            TempUnit::MilliDegreesCelsius => SITempUnit::Celsius,
+            TempUnit::MilliDegreesFahrenheit => SITempUnit::Fahrenheit,
+        },
+        rel_hum_percent: (meas.rel_hum_pcm as f32) / 1000.0,
+        precision: meas.precision
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use embedded_hal_mock as hal;
@@ -965,6 +1016,33 @@ mod tests {
            assert_eq!(m.rel_hum_pcm, rel_hum_pcm);
         }
     }
+
+    #[cfg(feature="fp")]
+    #[test]
+    fn test_sht40_si_measurement() {
+        let temp_si: f32 = 20.625;
+        let tunit_si = SITempUnit::Celsius;
+        let rel_hum_si: f32 = 9.625;
+
+        let temp: i32 = 20625;
+        let tunit = TempUnit::MilliDegreesCelsius;
+        let rel_hum_pcm: u32 = 9625;
+        let buf = gen_measurement_buf(temp, tunit, rel_hum_pcm); 
+
+        // Mock expected I2C transactions
+        let command_expectations = [
+            (Command::MeasureTempAndHumidity(Precision::High), buf)
+        ];
+        let i2c_expectations = gen_mock_expectations(&command_expectations);
+        let i2c_mock = I2cMock::new(&i2c_expectations);
+
+        let mut sht40 = SHT40Driver::new(i2c_mock, SHT40_I2C_ADDR, DelayMock);
+
+        if let Ok(m) = sht40.get_temp_and_rh(Precision::High, tunit) {
+           let m_si = convert_measurement_to_si(m);
+           assert_eq!(m_si.temp_unit, tunit_si);
+           assert_eq!(m_si.temp, temp_si);
+           assert_eq!(m_si.rel_hum_percent, rel_hum_si);
         }
     }
 }

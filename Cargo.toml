@@ -9,7 +9,9 @@ categories = ["embedded", "hardware-support", "no-std"]
 repository = "https://github.com/lc525/sensor-temp-humidity-sht40-rs"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[features]
+# enable floating-point measurement datatypes
+fp = [] 
 
 [dependencies]
 sensirion-i2c = { git="https://github.com/lc525/sensirion-i2c-rs", branch="hal-1.0.0-alpha.6" }
