@@ -308,10 +308,6 @@ pub struct RawMeasurement {
     precision: Precision,
 }
 
-/// Structure for storing the sensor serial number
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub struct SerialNumber(u16, u16);
-
 
 impl Command {
     fn as_device_command(self) -> DeviceCommand {
@@ -700,7 +696,7 @@ where
     }
 
     /// Get the SHT40 sensor serial number
-    pub fn get_serial(&mut self) -> Result<SerialNumber, Error<E>> {
+    pub fn get_serial(&mut self) -> Result<u32, Error<E>> {
         let mut rx_bytes = [0; 6];
         let cmd = Command::GetSerialNumber;
         self.i2c_command_and_response(cmd, Some(&mut rx_bytes))?;
@@ -708,7 +704,7 @@ where
         let serial_a = ((rx_bytes[0] as u16) << 8)  + (rx_bytes[1] as u16);
         let serial_b = ((rx_bytes[3] as u16) << 8)  + (rx_bytes[4] as u16);
 
-        Ok(SerialNumber(serial_a, serial_b))
+        Ok( ((serial_a as u32) << 16) + (serial_b as u32) )
     }
 
     /// Perform a soft reset of the sensor. After this command, the user of the
@@ -842,12 +838,11 @@ mod tests {
         [temp_buf[0], temp_buf[1], temp_crc, rel_hum_buf[0], rel_hum_buf[1], rel_crc]
     }
 
-    fn gen_serial_buf(serial_a: u16, serial_b: u16) -> [u8; 6] {
-        let sa_buf = serial_a.to_be_bytes();
-        let sa_crc = crc8::calculate(&sa_buf);
-        let sb_buf = serial_b.to_be_bytes();
-        let sb_crc = crc8::calculate(&sb_buf);
-        [sa_buf[0], sa_buf[1], sa_crc, sb_buf[0], sb_buf[1], sb_crc]
+    fn gen_serial_buf(serial_mock: u32) -> [u8; 6] {
+        let s_buf = serial_mock.to_be_bytes();
+        let sa_crc = crc8::calculate(&s_buf[0..2]);
+        let sb_crc = crc8::calculate(&s_buf[2..4]);
+        [s_buf[0], s_buf[1], sa_crc, s_buf[2], s_buf[3], sb_crc]
     }
 
     fn gen_mock_expectations(command_expectations: &[(Command, [u8; 6])]) -> Vec<Transaction> {
@@ -863,21 +858,19 @@ mod tests {
 
     #[test]
     fn test_sht40_serialnumber() {
-        let serial_a = 23100;
-        let serial_b = 25;
+        let serial_mock: u32 = 231997321;
 
         // Mock expected I2C transactions
         let command_expectations = [
-            (Command::GetSerialNumber, gen_serial_buf(serial_a, serial_b))
+            (Command::GetSerialNumber, gen_serial_buf(serial_mock))
         ];
         let i2c_expectations = gen_mock_expectations(&command_expectations);
         let i2c_mock = I2cMock::new(&i2c_expectations);
 
         let mut sht40 = SHT40Driver::new(i2c_mock, SHT40_I2C_ADDR, DelayMock);
 
-        if let Ok(SerialNumber(a, b)) = sht40.get_serial() {
-           assert_eq!(a, serial_a);
-           assert_eq!(b, serial_b);
+        if let Ok(serial) = sht40.get_serial() {
+           assert_eq!(serial, serial_mock);
         }
     }
 
