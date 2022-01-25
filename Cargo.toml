@@ -1,6 +1,6 @@
 [package]
 name = "sensor-temp-humidity-sht40"
-version = "0.2.600"
+version = "0.2.601"
 authors = ["Lucian Carata <luc@rez.how>"]
 license = "BSD-3-Clause OR Apache-2.0"
 description = "Driver for SHT40 temperature and humidity sensor"

@@ -23,12 +23,12 @@ SHT45) but this has not been tested.
 ## Crate Features
 
 - "fp": enable this feature if your CPU or MCU has a floating-point unit
-  and you want to be able to convert measured values to SI units (degrees
+  and you want to be able to convert measured values to common units (degrees
   Celsius, degreed Fahrenheit for temperature and % for relative humidity):
 
   `cargo build --features fp --release`
 
-  By default, instead of SI units, the driver stores measurements in 
+  By default, instead of common units, the driver stores measurements in 
   milli degrees Celsius or milli degrees Fahrenheit for temperature and in per 
   cent mille (pcm) for relative humidity, doing conversions using fixed-point
   arithmetic.
@@ -36,9 +36,9 @@ SHT45) but this has not been tested.
   A temperature of 23.89 degrees Celsius will be stored as 23890 and
   and a humidity of 56.2% will be stored as 56200.
 
-  With the fp feature, users of the API can directly convert back to SI units 
+  With the fp feature, users of the API can directly convert back to common units 
   using an utility function which takes a Measurement and returns an
-  SIMeasurement. Unless you need this convenience, it is probably best not to
+  MeasurementFp. Unless you need this convenience, it is probably best not to
   enable "fp" and propagate values as integers until just before displaying them
   to an end-user.
 

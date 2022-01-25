@@ -24,8 +24,8 @@
 /// ## Features
 ///
 /// - "fp": enable this feature if your CPU or MCU has a floating-point unit
-///   and you want to be able to convert measured values to SI units (degrees
-///   Celsius, degreed Fahrenheit for temperature and % for relative humidity).
+///   and you want to be able to convert measured values to common units (degrees
+///   Celsius, degrees Fahrenheit for temperature and % for relative humidity).
 ///
 ///   The driver stores measurements in milli degrees Celsius or milli degrees
 ///   Fahrenheit for temperature and in per cent mille (pcm) for relative 
@@ -34,7 +34,7 @@
 ///   be stored as 23890 and and a humidity of 56.2% is stored as 56200.
 ///
 ///   The fp feature adds data structures and a function for converting a
-///   Measurement structure to a SIMeasurement structure, converting to floating
+///   Measurement structure to a MeasurementFp structure, converting to floating
 ///   point as the very last step (after any other calibration offsets have
 ///   been applied to the measured values).
 ///
@@ -213,12 +213,12 @@ pub enum TempUnit {
     MilliDegreesCelsius,
 }
 
-/// SI Measurement unit for Temperature.
+/// Common measurement units for Temperature.
 ///
-/// Used only with `SIMeasurement` when the fp feature is enabled
+/// Used only with `MeasurementFp` when the fp feature is enabled
 #[cfg(feature="fp")]
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum SITempUnit {
+pub enum CommonTempUnit {
     Fahrenheit,
     Celsius,
 }
@@ -343,18 +343,18 @@ pub struct Measurement {
     pub precision: Precision,
 }
 
-/// A sensor SI measurement result.
+/// A sensor measurement result using a floating point representation.
 ///
-/// This is obtained by calling `convert_measurement_to_si` with an existing
+/// This is obtained by calling `convert_measurement_to_fp` with an existing
 /// Measurement object. Only available whem the "fp" feature is enabled as 
 /// temperature and relative humidity (%) are stored as floating point numbers.
 #[cfg(feature="fp")]
 #[derive(Debug, Clone, Copy)]
-pub struct SIMeasurement {
+pub struct MeasurementFp {
     /// Measured temperature
     pub temp: f32,
     /// Unit of temperature measurement (C or F)
-    pub temp_unit: SITempUnit,
+    pub temp_unit: CommonTempUnit,
     /// Measured relative humidity (%)
     pub rel_hum_percent: f32,
     /// The precision that was requested when performing the measurement.
@@ -912,15 +912,15 @@ pub fn convert_raw_to_units(raw_meas: RawMeasurement, temp_unit: TempUnit,
     }
 }
 
-/// Converts a Measurement to a SIMeasurement (containing floating-point
-/// values) using SI units. Requires the "fp" feature.
+/// Converts a Measurement to a MeasurementFp (containing floating-point
+/// values). Requires the "fp" feature.
 #[cfg(feature="fp")]
-pub fn convert_measurement_to_si(meas: Measurement) -> SIMeasurement {
-    SIMeasurement {
+pub fn convert_measurement_to_fp(meas: Measurement) -> MeasurementFp {
+    MeasurementFp {
         temp: (meas.temp as f32) / 1000.0,
         temp_unit: match meas.temp_unit {
-            TempUnit::MilliDegreesCelsius => SITempUnit::Celsius,
-            TempUnit::MilliDegreesFahrenheit => SITempUnit::Fahrenheit,
+            TempUnit::MilliDegreesCelsius => CommonTempUnit::Celsius,
+            TempUnit::MilliDegreesFahrenheit => CommonTempUnit::Fahrenheit,
         },
         rel_hum_percent: (meas.rel_hum_pcm as f32) / 1000.0,
         precision: meas.precision
@@ -1085,7 +1085,7 @@ mod tests {
     #[test]
     fn test_sht40_si_measurement() {
         let temp_si: f32 = 20.625;
-        let tunit_si = SITempUnit::Celsius;
+        let tunit_si = CommonTempUnit::Celsius;
         let rel_hum_si: f32 = 9.625;
 
         let temp: i32 = 20625;
@@ -1103,7 +1103,7 @@ mod tests {
         let mut sht40 = SHT40Driver::new(i2c_mock, SHT40_I2C_ADDR, DelayMock);
 
         if let Ok(m) = sht40.get_temp_and_rh(Precision::High, tunit) {
-           let m_si = convert_measurement_to_si(m);
+           let m_si = convert_measurement_to_fp(m);
            assert_eq!(m_si.temp_unit, tunit_si);
            assert_eq!(m_si.temp, temp_si);
            assert_eq!(m_si.rel_hum_percent, rel_hum_si);
