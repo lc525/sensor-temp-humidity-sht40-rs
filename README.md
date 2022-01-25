@@ -8,7 +8,10 @@ driver for the Sensirion SHT40 temperature and relative-humidity sensor.
 ### Software 
 
 The driver is developed against the stable 0.2.6 version of
-embedded-hal. Please use the main branch for hal-1.0.0 support
+embedded-hal. All releases from this branch are versioned 0.2.6xx with
+xx incrementing from one release to the next.
+
+Please use the [`main`](https://github.com/lc525/sensor-temp-humidity-sht40-rs/tree/main) branch for hal-1.0.0 support.
 
 ### Hardware Features
 
@@ -23,7 +26,7 @@ SHT45) but this has not been tested.
   and you want to be able to convert measured values to SI units (degrees
   Celsius, degreed Fahrenheit for temperature and % for relative humidity):
 
-  `cargo build --feature fp --release`
+  `cargo build --features fp --release`
 
   By default, instead of SI units, the driver stores measurements in 
   milli degrees Celsius or milli degrees Fahrenheit for temperature and in per 
